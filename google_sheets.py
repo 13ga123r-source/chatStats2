@@ -14,6 +14,7 @@ USE_CHAT_LINK = os.environ.get('USE_CHAT_LINK', 'true').lower() == 'true'
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 
 def append_record(record_data):
+    logger.info("🔍 append_record вызвана")
     """Добавляет строку в Google Таблицу, если функция включена."""
     if not ENABLED:
         logger.debug("Запись в Google Sheets отключена")
