@@ -55,11 +55,18 @@ def migrate_db():
             logger.info("✅ Добавлена колонка queue_name")
 
 def init_db():
+    # 1. Создаём директорию для базы данных, если её нет
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir and not os.path.exists(db_dir):
+        os.makedirs(db_dir, exist_ok=True)
+        logger.info(f"📁 Создана директория: {db_dir}")
+
+    # 2. Подключаемся к БД и настраиваем WAL
     with sqlite3.connect(DB_PATH, timeout=10) as conn:
         conn.execute('PRAGMA journal_mode = WAL')
-    migrate_db()
 
-init_db()
+    # 3. Выполняем миграцию (создание таблиц)
+    migrate_db()
 
 # ---------- Вспомогательные функции ----------
 def moscow_date_from_utc(utc_iso_str: str):
