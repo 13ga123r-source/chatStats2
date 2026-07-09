@@ -45,15 +45,6 @@ def get_or_create_worksheet(client, sheet_id, sheet_name):
         return worksheet
 
 def append_record(record_data):
-    creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
-logger.info(f"Длина JSON-ключа: {len(creds_json) if creds_json else 0}")
-if creds_json:
-    try:
-        import json
-        json.loads(creds_json)
-        logger.info("JSON валидный")
-    except Exception as e:
-        logger.error(f"JSON невалидный: {e}")
     logger.info("🔍 append_record вызвана")
     """Добавляет строку в Google Таблицу, если функция включена."""
     if not ENABLED:
@@ -65,6 +56,16 @@ if creds_json:
         return
 
     try:
+        # Добавляем отладку для проверки ключа
+        creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
+        logger.info(f"Длина JSON-ключа: {len(creds_json) if creds_json else 0}")
+        if creds_json:
+            try:
+                json.loads(creds_json)
+                logger.info("✅ JSON валидный")
+            except Exception as e:
+                logger.error(f"❌ JSON невалидный: {e}")
+
         creds = get_credentials()
         client = gspread.authorize(creds)
 
