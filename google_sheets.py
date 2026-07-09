@@ -1,9 +1,9 @@
-import traceback
 import gspread
 from google.oauth2.service_account import Credentials
 import os
 import logging
 import json
+import traceback
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ def append_record(record_data):
         return
 
     try:
-        # Добавляем отладку для проверки ключа
+        # Отладка JSON-ключа
         creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
         logger.info(f"Длина JSON-ключа: {len(creds_json) if creds_json else 0}")
         if creds_json:
@@ -92,6 +92,6 @@ def append_record(record_data):
         sheet.append_row(row)
         logger.info(f"✅ Запись в Google Sheets добавлена: {conv_id}")
 
-  except Exception as e:
+    except Exception as e:
         logger.error(f"❌ Ошибка при записи в Google Sheets: {e}")
-        logger.error(traceback.format_exc())
+        logger.error(traceback.format_exc())  # полный стек ошибки
