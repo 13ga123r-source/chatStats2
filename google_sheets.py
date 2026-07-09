@@ -1,3 +1,4 @@
+import traceback
 import gspread
 from google.oauth2.service_account import Credentials
 import os
@@ -91,5 +92,6 @@ def append_record(record_data):
         sheet.append_row(row)
         logger.info(f"✅ Запись в Google Sheets добавлена: {conv_id}")
 
-    except Exception as e:
+  except Exception as e:
         logger.error(f"❌ Ошибка при записи в Google Sheets: {e}")
+        logger.error(traceback.format_exc())
