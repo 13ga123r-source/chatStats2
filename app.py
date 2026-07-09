@@ -68,6 +68,9 @@ def init_db():
     # 3. Выполняем миграцию (создание таблиц)
     migrate_db()
 
+# Вызов инициализации БД при старте
+init_db()
+
 # ---------- Вспомогательные функции ----------
 def moscow_date_from_utc(utc_iso_str: str):
     """Возвращает дату в Москве в формате DD.MM.YYYY"""
@@ -83,7 +86,6 @@ def moscow_date_from_utc(utc_iso_str: str):
 
 def get_unique_dates():
     """Возвращает список уникальных дат (МСК) из БД, отсортированных по убыванию"""
-    # Используем прямой SQL для улучшения производительности
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute("""
             SELECT DISTINCT date(closed_at_utc, '+3 hours')
@@ -134,6 +136,10 @@ def webhook():
         payload = request.get_json(silent=True)
         if not payload:
             return ("", 200)
+
+        # Логируем полный payload для отладки
+        logger.info(f"📨 Получен вебхук: {payload}")
+
         event = payload.get('event')
         if event != 'chat.closed':
             return ("", 200)
@@ -143,14 +149,20 @@ def webhook():
 
         queue = data.get('queue') or {}
         queue_name = queue.get('name', '')
+
         operator = data.get('operator') or {}
         operator_name = operator.get('name')
+        if not operator_name:
+            operator_name = 'Бот (автозакрытие)'
+            logger.info(f"ℹ️ Оператор отсутствует, используется '{operator_name}'")
+
         conversation = data.get('conversation') or {}
         conv_id = conversation.get('id')
         closed_at = conversation.get('closed_at')
 
-        if not operator_name or not conv_id or not closed_at:
-            logger.warning(f"⚠️ Пропущен: name={operator_name}, id={conv_id}, closed_at={closed_at}")
+        # Проверяем только обязательные поля
+        if not conv_id or not closed_at:
+            logger.warning(f"⚠️ Пропущен: conv_id={conv_id}, closed_at={closed_at}")
             return ("", 200)
 
         # Сохраняем в SQLite
