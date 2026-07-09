@@ -26,7 +26,7 @@ def append_record(record_data):
     try:
         creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
         client = gspread.authorize(creds)
-        sheet = client.open_by_key(SHEET_ID).sheet1  # можно заменить на .worksheet("Имя листа")
+        sheet = client.open_by_key(SHEET_ID).worksheet("logs")  # можно заменить на .worksheet("Имя листа")
 
         # Формируем значение для conversation_id (ссылку или просто ID)
         conv_id = record_data.get('conversation_id', '')
