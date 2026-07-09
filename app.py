@@ -1,11 +1,21 @@
 import os
 import sqlite3
+import threading
+import logging
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from flask import Flask, request, render_template_string
 
+# Импортируем нашу функцию и флаг включения
+from google_sheets import append_record, ENABLED as GS_ENABLED
+
 app = Flask(__name__)
 
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Переменные окружения
 DB_PATH = os.environ.get('DB_PATH', 'stats.db')
 PORT = int(os.environ.get('PORT', 5000))
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
@@ -18,6 +28,7 @@ CHANNEL_ORDER = [
     "Collection PLZ: Chat"
 ]
 
+# ---------- Работа с БД ----------
 def migrate_db():
     """Создаёт таблицу с колонкой queue_name, если её нет"""
     with sqlite3.connect(DB_PATH, timeout=10) as conn:
@@ -33,7 +44,7 @@ def migrate_db():
                 )
             ''')
             conn.execute("CREATE INDEX IF NOT EXISTS idx_closed_at ON closed_chats(closed_at_utc)")
-            print("✅ Таблица closed_chats создана")
+            logger.info("✅ Таблица closed_chats создана")
             return
 
         # Проверяем наличие колонки queue_name
@@ -41,7 +52,7 @@ def migrate_db():
         has_queue = any(col[1] == 'queue_name' for col in columns)
         if not has_queue:
             conn.execute("ALTER TABLE closed_chats ADD COLUMN queue_name TEXT")
-            print("✅ Добавлена колонка queue_name")
+            logger.info("✅ Добавлена колонка queue_name")
 
 def init_db():
     with sqlite3.connect(DB_PATH, timeout=10) as conn:
@@ -50,46 +61,57 @@ def init_db():
 
 init_db()
 
+# ---------- Вспомогательные функции ----------
 def moscow_date_from_utc(utc_iso_str: str):
     """Возвращает дату в Москве в формате DD.MM.YYYY"""
-    cleaned = utc_iso_str.replace('Z', '+00:00')
-    if '+' not in cleaned:
-        cleaned += '+00:00'
-    dt_utc = datetime.fromisoformat(cleaned).replace(tzinfo=timezone.utc)
-    moscow_dt = dt_utc.astimezone(MOSCOW_TZ)
-    return moscow_dt.strftime('%d.%m.%Y')
+    try:
+        cleaned = utc_iso_str.replace('Z', '+00:00')
+        if '+' not in cleaned:
+            cleaned += '+00:00'
+        dt_utc = datetime.fromisoformat(cleaned).replace(tzinfo=timezone.utc)
+        moscow_dt = dt_utc.astimezone(MOSCOW_TZ)
+        return moscow_dt.strftime('%d.%m.%Y')
+    except Exception:
+        return None
 
 def get_unique_dates():
     """Возвращает список уникальных дат (МСК) из БД, отсортированных по убыванию"""
+    # Используем прямой SQL для улучшения производительности
     with sqlite3.connect(DB_PATH) as conn:
-        rows = conn.execute("SELECT closed_at_utc FROM closed_chats").fetchall()
-    dates_set = set()
-    for (closed_utc,) in rows:
+        rows = conn.execute("""
+            SELECT DISTINCT date(closed_at_utc, '+3 hours')
+            FROM closed_chats
+            WHERE closed_at_utc IS NOT NULL
+            ORDER BY date(closed_at_utc, '+3 hours') DESC
+        """).fetchall()
+    dates = [r[0] for r in rows if r[0] is not None]
+    # Преобразуем YYYY-MM-DD в DD.MM.YYYY
+    result = []
+    for d in dates:
         try:
-            d = moscow_date_from_utc(closed_utc)
-            dates_set.add(d)
+            dt = datetime.strptime(d, '%Y-%m-%d')
+            result.append(dt.strftime('%d.%m.%Y'))
         except:
-            pass
-    # Сортировка по дате (от новых к старым)
-    sorted_dates = sorted(dates_set, key=lambda x: datetime.strptime(x, '%d.%m.%Y'), reverse=True)
-    return sorted_dates
+            continue
+    return result
 
 def get_stats_for_date(date_str):
     """Возвращает статистику за указанную дату (DD.MM.YYYY) в виде словаря:
        { queue_name: { operator_name: count } }
     """
-    # Преобразуем DD.MM.YYYY в YYYY-MM-DD для SQL
     try:
         d = datetime.strptime(date_str, '%d.%m.%Y')
         sql_date = d.strftime('%Y-%m-%d')
     except:
         return {}
+
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute('''
             SELECT operator_name, queue_name
             FROM closed_chats
             WHERE date(closed_at_utc, '+3 hours') = ?
         ''', (sql_date,)).fetchall()
+
     groups = {}
     for operator, queue in rows:
         q = queue if queue else 'Без канала'
@@ -98,6 +120,7 @@ def get_stats_for_date(date_str):
         groups[q][operator] = groups[q].get(operator, 0) + 1
     return groups
 
+# ---------- Обработчики Flask ----------
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
@@ -120,23 +143,36 @@ def webhook():
         closed_at = conversation.get('closed_at')
 
         if not operator_name or not conv_id or not closed_at:
-            print(f"⚠️ Пропущен: name={operator_name}, id={conv_id}, closed_at={closed_at}")
+            logger.warning(f"⚠️ Пропущен: name={operator_name}, id={conv_id}, closed_at={closed_at}")
             return ("", 200)
 
+        # Сохраняем в SQLite
         with sqlite3.connect(DB_PATH, timeout=10) as conn:
             conn.execute('''
                 INSERT INTO closed_chats (operator_name, conversation_id, closed_at_utc, queue_name)
                 VALUES (?, ?, ?, ?)
             ''', (operator_name, conv_id, closed_at, queue_name))
-            print(f"✅ Сохранён {operator_name} - {conv_id} (канал: {queue_name or 'не указан'})")
+            logger.info(f"✅ Сохранён {operator_name} - {conv_id} (канал: {queue_name or 'не указан'})")
+
+        # ---- Асинхронная запись в Google Sheets ----
+        if GS_ENABLED:
+            record_data = {
+                'operator_name': operator_name,
+                'conversation_id': conv_id,
+                'closed_at_utc': closed_at,
+                'queue_name': queue_name,
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            }
+            threading.Thread(target=append_record, args=(record_data,), daemon=True).start()
+
         return ("", 200)
     except Exception as e:
-        print(f"❌ Ошибка: {e}")
+        logger.error(f"❌ Ошибка в webhook: {e}")
         return ("", 200)
 
+# ---------- Страница статистики ----------
 @app.route('/stats')
 def stats():
-    # Получаем параметр date, если не задан – сегодня
     date_param = request.args.get('date')
     if date_param:
         try:
@@ -147,14 +183,9 @@ def stats():
     else:
         selected_date = datetime.now(MOSCOW_TZ).strftime('%d.%m.%Y')
 
-    # Статистика за выбранную дату
     groups = get_stats_for_date(selected_date)
-    # Уникальные даты для кнопок
-    all_dates = get_unique_dates()
-    # Сортируем и выбираем топ-10 последних (чтобы не перегружать интерфейс)
-    all_dates = all_dates[:15]  # не более 15 кнопок
+    all_dates = get_unique_dates()[:15]  # ограничим 15 датами
 
-    # HTML-шаблон
     html = '''
     <!DOCTYPE html>
     <html>
@@ -179,9 +210,7 @@ def stats():
                 color: white;
                 border-color: #4CAF50;
             }
-            .date-button:hover {
-                background-color: #ddd;
-            }
+            .date-button:hover { background-color: #ddd; }
             .channel { margin-bottom: 30px; }
             .channel h3 { margin-bottom: 10px; color: #2c3e50; }
             table {
@@ -201,7 +230,6 @@ def stats():
     </head>
     <body>
         <h2>📊 Статистика закрытых чатов за {{ selected_date }}</h2>
-
         <div class="dates">
             <a href="/stats" class="date-button {% if selected_date == today %}active{% endif %}">Сегодня</a>
             {% for d in all_dates %}
@@ -252,8 +280,6 @@ def stats():
     </body>
     </html>
     '''
-
-    from flask import render_template_string
     return render_template_string(
         html,
         selected_date=selected_date,
@@ -263,6 +289,7 @@ def stats():
         channel_order=CHANNEL_ORDER
     )
 
+# ---------- Отладочные эндпоинты ----------
 @app.route('/debug')
 def debug():
     with sqlite3.connect(DB_PATH) as conn:
@@ -281,5 +308,5 @@ def health():
     return "OK"
 
 if __name__ == '__main__':
-    print(f"🚀 Сервер запущен на порту {PORT}")
+    logger.info(f"🚀 Сервер запущен на порту {PORT}")
     app.run(host='0.0.0.0', port=PORT, threaded=True)
